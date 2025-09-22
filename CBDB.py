@@ -11,6 +11,7 @@ import re
 import json
 
 API_KEY_QWEN = "c9b5bdc2162847418f1dc147f1c3ea17.2ew6MArRBcAGNAzt"
+API_KEY_DEEPSEEK = ""
 
 
 class CBDBRAGSystem:
