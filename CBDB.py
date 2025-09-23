@@ -10,7 +10,7 @@ from typing import List, Dict, Any
 import re
 import json
 
-API_KEY_QWEN = "c9b5bdc2162847418f1dc147f1c3ea17.2ew6MArRBcAGNAzt"
+API_KEY_QWEN = "sk-3ebfc5913e51470b86b252730364ba16"
 API_KEY_DEEPSEEK = ""
 
 
@@ -328,7 +328,7 @@ class CBDBRAGSystem:
 
         try:
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="qwen-plus",
                 messages=[
                     {"role": "system", "content": "你是一个帮助用户查询中国历史人物信息的专业助手。"},
                     {"role": "user", "content": prompt}
@@ -388,14 +388,13 @@ def main():
     rag_system = CBDBRAGSystem("latest.db")
 
     # 第一次运行时需要构建向量数据库（取消注释下一行）
-    rag_system.setup_vector_database(limit=1000)  # 限制1000条用于测试
+    # rag_system.setup_vector_database(limit=1000)  # 限制1000条用于测试
 
     # 示例查询
     questions = [
-        "苏轼的生平事迹",
-        "王安石变法的相关人物",
-        "宋代的著名文学家",
-        "明代的科举状元"
+        "苏轼的父亲和兄弟",
+        "李清照的丈夫",
+        "张宗象是多少年出生的"
     ]
 
     for question in questions:
