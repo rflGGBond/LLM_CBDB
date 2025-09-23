@@ -84,10 +84,105 @@ class CBDBRAGSystem:
         print("正在将CBDB数据向量化并保存到FAISS中......")
 
         # 查询人物基本信息
-        # query = """
-        # SELECT p.c_personid, p.c_name_chn, p.c_index_year, p.c_death_year,
-        #        p.c_birthplace_id, p.c_notes_chn, b.c_name_chn as birthplace_name
-        # FROM biog_main p
-        # LEFT JOIN addresses b ON p.c_birthplace_id = b.c_addr_id
-        # WHERE p.c_notes_chn IS NOT NULL AND LENGTH(p.c_notes_chn) > 10
-        # """
+        query = """
+        SELECT p.c_personid, p.c_name_chn, p.c_index_year, p.c_deathyear,
+               p.c_index_addr_id, p.c_notes, b.c_name_chn as birthplace_name
+        FROM biog_main p
+        LEFT JOIN addresses b ON p.c_index_addr_id = b.c_addr_id
+        WHERE p.c_notes IS NOT NULL AND LENGTH(p.c_notes) > 10
+        """
+
+        if limit:
+            query += f" LIMIT {limit}"
+
+        df = pd.read_sql_query(query, self.db_conn)
+        print(f"从数据库检索到 {len(df)} 条记录")
+
+        all_embeddings = []
+        self.documents = []
+        self.metadata = []
+
+        # 处理数据并生成嵌入
+        for _, row in df.iterrows():
+            # 构建文档文本
+            doc_text = f"人物: {row['c_name_chn']}"
+            if pd.notna(row['c_index_year']):
+                birth_year = int(row['c_index_year']) if not pd.isna(row['c_index_year']) else None
+                death_year = int(row['c_deathyear']) if not pd.isna(row['c_deathyear']) else None
+                doc_text += f", 生卒年: {birth_year or '?'}-{death_year or '?'}"
+            if pd.notna(row['birthplace_name']):
+                doc_text += f", 籍贯: {row['birthplace_name']}"
+            if pd.notna(row['c_notes']):
+                doc_text += f", 生平: {row['c_notes'][:500]}"  # 限制文本长度
+
+            self.documents.append(doc_text)
+            self.metadata.append({
+                "person_id": row['c_personid'],
+                "name": row['c_name_chn'],
+                "birth_year": row['c_index_year'],
+                "death_year": row['c_deathyear'],
+                "birthplace": row['birthplace_name'],
+                "biography": row['c_notes'][:1000] if pd.notna(row['c_notes']) else ""
+            })
+
+        # 批量生成嵌入
+        print("生成文本嵌入...")
+        for i in range(0, len(self.documents), batch_size):
+            batch_docs = self.documents[i:i + batch_size]
+            batch_embeddings = self.embedding.encode(batch_docs)
+            all_embeddings.append(batch_embeddings)
+            print(f"已处理 {min(i + batch_size, len(self.documents))}/{len(self.documents)} 条记录")
+
+        # 合并所有嵌入
+        all_embeddings = np.vstack(all_embeddings).astype('float32')
+        self.vector_dim = all_embeddings.shape[1]
+
+        # 创建FAISS索引
+        print("创建FAISS索引...")
+        self.index = faiss.IndexFlatIP(self.vector_dim)  # 使用内积相似度
+        # 或者使用 IndexFlatL2 用于欧氏距离
+
+        # 归一化向量以便使用内积计算余弦相似度
+        faiss.normalize_L2(all_embeddings)
+        self.index.add(all_embeddings)
+
+        print(f"FAISS索引构建完成，包含 {self.index.ntotal} 个向量")
+
+        # 保存索引
+        self._save_faiss_index()
+
+    def search_cbdb_semantic(self, query: str, top_k: int = 5) -> List[Dict]:
+        """
+        使用FAISS进行语义搜索
+
+        Args:
+            query: 查询文本
+            top_k: 返回结果数量
+
+        Returns:
+            搜索结果列表
+        """
+        if self.index is None or len(self.documents) == 0:
+            print("FAISS索引未初始化，请先调用 setup_vector_database()")
+            return []
+
+        # 生成查询嵌入
+        query_embedding = self.embedding.encode([query])
+        query_embedding = query_embedding.astype('float32')
+
+        # 归一化查询向量
+        faiss.normalize_L2(query_embedding)
+
+        # 搜索
+        distances, indices = self.index.search(query_embedding, top_k)
+
+        results = []
+        for i, idx in enumerate(indices[0]):
+            if idx < len(self.documents):  # 确保索引有效
+                results.append({
+                    "document": self.documents[idx],
+                    "metadata": self.metadata[idx],
+                    "score": float(distances[0][i])  # 相似度分数
+                })
+
+        return results
