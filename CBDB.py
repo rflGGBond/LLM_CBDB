@@ -9,13 +9,44 @@ import os
 from typing import List, Dict, Any
 import re
 import json
+import requests
 
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
+DATABASE_NAME = "latest.db"
 API_KEY_QWEN = "sk-3ebfc5913e51470b86b252730364ba16"
-API_KEY_DEEPSEEK = ""
+
+
+def _generate_with_local_llm(prompt: str) -> str:
+    try:
+        # 调用 Ollama API
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "qwen2.5:7b",
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.3,
+                    "num_ctx": 4096,  # 上下文长度
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.1
+                }
+            },
+            timeout=120  # 大模型生成可能较慢，设置超时
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("response", "模型未返回有效内容").strip()
+        else:
+            return f"❌ 模型调用失败：HTTP {response.status_code}"
+
+    except Exception as e:
+        return f"❌ 本地模型调用异常：{str(e)}"
 
 
 class CBDBRAGSystem:
-    def __init__(self, db_path: str, embedding_model_name: str = 'BAAI/bge-small-zh-v1.5'):
+    def __init__(self, db_path: str, embedding_model_name: str = EMBEDDING_MODEL_NAME):
         """
          初始化系统
         :param db_path: CBDB数据库路径
@@ -89,7 +120,7 @@ class CBDBRAGSystem:
                p.c_index_addr_id, p.c_notes, b.c_name_chn as birthplace_name
         FROM biog_main p
         LEFT JOIN addresses b ON p.c_index_addr_id = b.c_addr_id
-        WHERE p.c_notes IS NOT NULL AND LENGTH(p.c_notes) > 10
+        WHERE p.c_notes IS NOT NULL AND LENGTH(p.c_notes) > 1
         """
 
         if limit:
@@ -235,7 +266,7 @@ class CBDBRAGSystem:
 
         return results
 
-    def get_person_details(self, person_id: int) -> Dict:
+    def get_person_details(self, person_id: int) -> dict[str, list[dict[str, Any]] | Any] | None:
         """
         获取人物详细信息
         """
@@ -298,7 +329,7 @@ class CBDBRAGSystem:
                 meta = item['metadata']
                 context_str += f"\n人物: {meta.get('name', '未知')}"
                 if meta.get('birth_year'):
-                    context_str += f"\n生卒年: {meta.get('birth_year')}-{meta.get('death_year', '?')}"
+                    context_str += f"\n生卒年: {meta.get('birth_year')}-{meta.get('deathyear', '?')}"
                 if meta.get('birthplace'):
                     context_str += f"\n籍贯: {meta.get('birthplace')}"
                 if meta.get('biography'):
@@ -306,7 +337,7 @@ class CBDBRAGSystem:
             elif 'name' in item:
                 context_str += f"\n人物: {item['name']}"
                 if item.get('birth_year'):
-                    context_str += f"\n生卒年: {item.get('birth_year')}-{item.get('death_year', '?')}"
+                    context_str += f"\n生卒年: {item.get('birth_year')}-{item.get('deathyear', '?')}"
                 if item.get('biography'):
                     context_str += f"\n生平: {item.get('biography')[:300]}..."
 
@@ -326,19 +357,7 @@ class CBDBRAGSystem:
     回答请使用中文，保持专业且易于理解。
     回答："""
 
-        try:
-            response = self.client.chat.completions.create(
-                model="qwen-plus",
-                messages=[
-                    {"role": "system", "content": "你是一个帮助用户查询中国历史人物信息的专业助手。"},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1000,
-                temperature=0.3
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"生成回答时出错: {str(e)}"
+        _generate_with_local_llm(prompt)
 
     def query(self, question: str, search_type: str = "hybrid", top_k: int = 5) -> str:
         """
@@ -385,10 +404,10 @@ class CBDBRAGSystem:
 # 使用示例
 def main():
     # 初始化系统
-    rag_system = CBDBRAGSystem("latest.db")
+    rag_system = CBDBRAGSystem(DATABASE_NAME)
 
     # 第一次运行时需要构建向量数据库（取消注释下一行）
-    # rag_system.setup_vector_database(limit=1000)  # 限制1000条用于测试
+    rag_system.setup_vector_database(limit=1000)  # 限制1000条用于测试
 
     # 示例查询
     questions = [
