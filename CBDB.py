@@ -186,3 +186,227 @@ class CBDBRAGSystem:
                 })
 
         return results
+
+    def search_cbdb_keyword(self, query: str, top_k: int = 5) -> List[Dict]:
+        """
+        关键词搜索CBDB数据库
+        """
+        cursor = self.db_conn.cursor()
+
+        # 提取人名关键词
+        name_keywords = re.findall(r'[\u4e00-\u9fff]{2,4}', query)
+
+        if name_keywords:
+            name_conditions = " OR ".join(["p.c_name_chn LIKE ?" for _ in name_keywords])
+            sql = f"""
+            SELECT p.c_personid, p.c_name_chn, p.c_index_year, p.c_deathyear, 
+                   p.c_index_addr_id, p.c_notes, b.c_name_chn as birthplace_name
+            FROM biog_main p
+            LEFT JOIN addresses b ON p.c_index_addr_id = b.c_addr_id
+            WHERE ({name_conditions}) OR p.c_notes LIKE ?
+            LIMIT ?
+            """
+
+            params = [f"%{name}" for name in name_keywords] + [f"%{query}", top_k]
+            cursor.execute(sql, params)
+        else:
+            sql = f"""
+            SELECT p.c_personid, p.c_name_chn, p.c_index_year, p.c_deathyear, 
+                   p.c_index_addr_id, p.c_notes, b.c_name_chn as birthplace_name
+            FROM biog_main p
+            LEFT JOIN addresses b ON p.c_index_addr_id = b.c_addr_id
+            WHERE  p.c_name_chn LIKE ? OR p.c_notes LIKE ?
+            LIMIT ?
+            """
+
+            cursor.execute(sql, [f"%{query}", top_k])
+
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "person_id": row[0],
+                "name": row[1],
+                "birth_year": row[2],
+                "death_year": row[3],
+                "birthplace": row[5],
+                "biography": row[6],
+                "score": 1.0  # 关键词搜索没有相似度分数，设为1.0
+            })
+
+        return results
+
+    def get_person_details(self, person_id: int) -> Dict:
+        """
+        获取人物详细信息
+        """
+        cursor = self.db_conn.cursor()
+
+        # 获取基本信息
+        cursor.execute("""
+        SELECT p.c_personid, p.c_name_chn, p.c_index_year,
+         p.c_deathyear, p.c_index_addr_id, p.c_notes, b.c_name_chn as birthplace_name
+        FROM biog_main p
+        LEFT JOIN addresses b ON p.c_index_addr_id = b.c_addr_id
+        WHERE c_personid = ?
+        """, (person_id,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        person_info = {
+            "person_id": row[0],
+            "name": row[1],
+            "birth_year": row[2],
+            "death_year": row[3],
+            "birthplace_id": row[4],
+            "biography": row[5],
+            "birthplace_name": row[6]
+        }
+
+        # 获取亲属关系
+        cursor.execute("""
+            SELECT r.c_kin_id, r.c_kin_code, r.c_notes, p.c_name_chn
+            FROM kin_data r 
+            JOIN biog_main p ON r.c_kin_id = p.c_personid 
+            WHERE r.c_personid = ?
+            """, (person_id,))
+
+        relationships = []
+        for row in cursor.fetchall():
+            kin_id, kin_code, notes, kin_name = row
+
+            relationships.append({
+                "kin_id": kin_id,
+                "kin_code": kin_code,
+                "kin_name": kin_name,
+                "notes": notes
+            })
+
+        person_info["relationships"] = relationships
+
+        return person_info
+
+    def generate_answer(self, query: str, context: List[Dict]) -> str:
+        """
+        使用LLM生成答案
+        """
+        context_str = ""
+        for i, item in enumerate(context):
+            context_str += f"\n【来源 {i + 1}】"
+            if 'metadata' in item:
+                meta = item['metadata']
+                context_str += f"\n人物: {meta.get('name', '未知')}"
+                if meta.get('birth_year'):
+                    context_str += f"\n生卒年: {meta.get('birth_year')}-{meta.get('death_year', '?')}"
+                if meta.get('birthplace'):
+                    context_str += f"\n籍贯: {meta.get('birthplace')}"
+                if meta.get('biography'):
+                    context_str += f"\n生平: {meta.get('biography')[:300]}..."
+            elif 'name' in item:
+                context_str += f"\n人物: {item['name']}"
+                if item.get('birth_year'):
+                    context_str += f"\n生卒年: {item.get('birth_year')}-{item.get('death_year', '?')}"
+                if item.get('biography'):
+                    context_str += f"\n生平: {item.get('biography')[:300]}..."
+
+            if 'score' in item:
+                context_str += f"\n相似度: {item['score']:.3f}"
+            context_str += "\n"
+
+        prompt = f"""你是一个中国历史专家，请根据以下从CBDB数据库检索到的信息回答问题。
+
+    检索到的信息：
+    {context_str}
+
+    用户问题：{query}
+
+    请根据上述信息提供准确、详细的回答。在回答中请注明信息来源（如【来源1】）。
+    如果信息不足，可以适当补充相关知识，但请明确区分哪些信息来自CBDB数据库。
+    回答请使用中文，保持专业且易于理解。
+    回答："""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "你是一个帮助用户查询中国历史人物信息的专业助手。"},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.3
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"生成回答时出错: {str(e)}"
+
+    def query(self, question: str, search_type: str = "hybrid", top_k: int = 5) -> str:
+        """
+        执行查询
+        """
+        print(f"正在处理问题: {question}")
+
+        # 检索相关信息
+        if search_type == "semantic":
+            context = self.search_cbdb_semantic(question, top_k)
+        elif search_type == "keyword":
+            context = self.search_cbdb_keyword(question, top_k)
+        else:  # hybrid
+            semantic_results = self.search_cbdb_semantic(question, top_k)
+            keyword_results = self.search_cbdb_keyword(question, top_k)
+
+            # 合并结果（基于person_id去重）
+            context = []
+            seen_ids = set()
+
+            for result in keyword_results:
+                if result['person_id'] not in seen_ids:
+                    context.append(result)
+                    seen_ids.add(result['person_id'])
+
+            for result in semantic_results:
+                person_id = result['metadata']['person_id']
+                if person_id not in seen_ids:
+                    context.append(result)
+                    seen_ids.add(person_id)
+
+            # 按相似度排序（如果有）
+            context.sort(key=lambda x: x.get('score', 0), reverse=True)
+            context = context[:top_k]
+
+        if not context:
+            return "抱歉，在CBDB数据库中未找到相关信息。"
+
+        # 生成回答
+        answer = self.generate_answer(question, context)
+        return answer
+
+
+# 使用示例
+def main():
+    # 初始化系统
+    rag_system = CBDBRAGSystem("latest.db")
+
+    # 第一次运行时需要构建向量数据库（取消注释下一行）
+    rag_system.setup_vector_database(limit=1000)  # 限制1000条用于测试
+
+    # 示例查询
+    questions = [
+        "苏轼的生平事迹",
+        "王安石变法的相关人物",
+        "宋代的著名文学家",
+        "明代的科举状元"
+    ]
+
+    for question in questions:
+        print(f"\n{'=' * 60}")
+        print(f"问题: {question}")
+        print(f"{'=' * 60}")
+
+        answer = rag_system.query(question, search_type="hybrid")
+        print(f"回答: {answer}")
+        print(f"{'=' * 60}\n")
+
+
+if __name__ == "__main__":
+    main()
